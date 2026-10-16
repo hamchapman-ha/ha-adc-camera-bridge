@@ -1,0 +1,28 @@
+name: Alarm.com Camera Bridge
+version: "0.1.0"
+slug: adc_camera_bridge
+url: https://github.com/hamchapman-ha/ha-adc-camera-bridge
+description: >-
+  Live video from Alarm.com / ADT cameras as local RTSP streams, so Home
+  Assistant and HomeKit can show them. Uses the alarmdotcom integration.
+arch:
+  - aarch64
+  - amd64
+startup: application
+boot: auto
+host_network: true
+homeassistant_api: true
+options:
+  rtsp_port: 8554
+  lan_access: false
+  rtsp_username: ""
+  rtsp_password: ""
+  exclude: ""
+  log_level: info
+schema:
+  rtsp_port: port
+  lan_access: bool
+  rtsp_username: str?
+  rtsp_password: password?
+  exclude: str?
+  log_level: list(info|debug)

@@ -1,0 +1,23 @@
+configuration:
+  rtsp_port:
+    name: RTSP port
+    description: Port the camera streams are served on.
+  lan_access:
+    name: Allow other devices on your network
+    description: >-
+      Off keeps the streams private to Home Assistant (recommended). On makes
+      them reachable from other devices and requires a username and password.
+  rtsp_username:
+    name: RTSP username
+    description: Only used when other devices are allowed.
+  rtsp_password:
+    name: RTSP password
+    description: Only used when other devices are allowed.
+  exclude:
+    name: Cameras to skip
+    description: >-
+      Comma-separated camera entity IDs to leave out, for example
+      camera.garden_camera. Leave empty to include every Alarm.com camera.
+  log_level:
+    name: Log level
+    description: Use debug to see more detail from the camera connections.

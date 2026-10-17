@@ -1,8 +1,15 @@
 #!/usr/bin/env python3
 """
-App entrypoint: find the Alarm.com cameras in Home Assistant, write a go2rtc
-config with one on-demand stream per camera, then hand over to go2rtc.
+App entrypoint: find the Alarm.com cameras in Home Assistant, start the
+session manager (one shared camera session per camera), and run go2rtc to
+serve each camera as a local RTSP stream.
 """
+
+import asyncio
+import logging
+import signal
+
+from manager import Camera, serve
 
 import json
 import os
@@ -13,6 +20,7 @@ import urllib.request
 OPTIONS_FILE = os.environ.get("ADC_OPTIONS", "/data/options.json")
 GO2RTC_CONFIG = os.environ.get("GO2RTC_CONFIG", "/tmp/go2rtc.yaml")
 APP_DIR = os.environ.get("ADC_APP_DIR", "/app")
+SOCK_DIR = os.environ.get("ADC_SOCK_DIR", "/tmp/adc")
 SECRET_HINTS = ("token", "password", "credential", "secret", "key")
 
 
@@ -107,11 +115,11 @@ def main():
         time.sleep(300)
         sys.exit(1)
 
+    linger = int(opts.get("linger_seconds", 60))
     listen = f":{port}" if lan else f"127.0.0.1:{port}"
     lines = [
         "log:",
         "  level: info",
-        "  exec: debug",  # our streamer's messages arrive as exec debug lines
         "  format: text",
         "api:",
         '  listen: "127.0.0.1:11985"',
@@ -127,12 +135,13 @@ def main():
         '  listen: ""',
         "streams:",
     ]
-    prefix = "env ADC_DEBUG=1 " if debug else ""  # go2rtc runs commands without a shell
+    cameras = []
     log(f"Found {len(cams)} Alarm.com camera(s):")
     for eid, attrs in cams:
         name = eid.split(".", 1)[1]
-        cmd = f"exec:{prefix}python3 -u {APP_DIR}/adc_stream.py {eid}#killsignal=15#killtimeout=5"
+        cmd = f"exec:python3 -u {APP_DIR}/adc_client.py {name}#killsignal=15#killtimeout=3"
         lines.append(f"  {name}: {yaml_str(cmd)}")
+        cameras.append(Camera(name, eid, APP_DIR, linger, debug))
         friendly = attrs.get("friendly_name", name)
         log(f"  {friendly}: rtsp://127.0.0.1:{port}/{name}")
         log(f"    webrtc_config: {describe_config(attrs.get('webrtc_config'))}")
@@ -141,11 +150,41 @@ def main():
             f"(username {user})")
     else:
         log("RTSP is local to Home Assistant only (turn on lan_access to use it from other devices)")
+    log(f"Camera sessions stay open {linger}s after the last viewer leaves.")
 
     with open(GO2RTC_CONFIG, "w") as f:
         f.write("\n".join(lines) + "\n")
-    log("Starting go2rtc. Cameras connect only while something is watching.")
-    os.execvp("go2rtc", ["go2rtc", "-config", GO2RTC_CONFIG])
+
+    logging.basicConfig(level=logging.DEBUG if debug else logging.INFO, format="[bridge] %(message)s")
+    sys.exit(asyncio.run(run_services(cameras)))
+
+
+async def run_services(cameras):
+    """Run the session manager and go2rtc until either stops or we're told to stop."""
+    await serve(cameras, SOCK_DIR)
+    env = dict(os.environ, ADC_SOCK_DIR=SOCK_DIR)
+    go2rtc = await asyncio.create_subprocess_exec("go2rtc", "-config", GO2RTC_CONFIG, env=env)
+    log("Started go2rtc. Cameras connect only while something is watching.")
+
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, stop.set)
+    go2rtc_exit = asyncio.create_task(go2rtc.wait())
+    await asyncio.wait([go2rtc_exit, asyncio.create_task(stop.wait())], return_when=asyncio.FIRST_COMPLETED)
+
+    code = 0
+    if go2rtc_exit.done():
+        code = go2rtc.returncode or 1
+        log(f"go2rtc exited unexpectedly (code {go2rtc.returncode}); stopping")
+    else:
+        go2rtc.terminate()
+        try:
+            await asyncio.wait_for(go2rtc.wait(), timeout=5)
+        except asyncio.TimeoutError:
+            go2rtc.kill()
+    await asyncio.gather(*(c.stop() for c in cameras), return_exceptions=True)
+    return code
 
 
 if __name__ == "__main__":

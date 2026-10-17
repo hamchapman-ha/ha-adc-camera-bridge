@@ -18,6 +18,13 @@ configuration:
     description: >-
       Comma-separated camera entity IDs to leave out, for example
       camera.garden_camera. Leave empty to include every Alarm.com camera.
+  linger_seconds:
+    name: Keep camera sessions open (seconds)
+    description: >-
+      How long a camera stays connected after the last viewer leaves. Keeps
+      the Home app's regular previews on one session instead of reconnecting
+      for each one, and makes opening live view instant. 0 disconnects
+      straight away.
   log_level:
     name: Log level
     description: Use debug to see more detail from the camera connections.

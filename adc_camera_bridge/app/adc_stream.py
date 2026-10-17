@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Alarm.com camera -> raw H.264 on stdout, for go2rtc's `exec:` source.
+Alarm.com camera -> H.264 on stdout.
 
-go2rtc starts this when someone opens the camera's RTSP stream and stops it
-(SIGTERM) when the last viewer leaves. While running it:
+The app's session manager starts this when a camera is first viewed and stops
+it (SIGTERM) a while after the last viewer leaves. While running it:
 
   1. asks Home Assistant's alarmdotcom integration for fresh WebRTC tokens
      (camera.turn_on, then reads the camera entity's webrtc_config),
@@ -11,7 +11,9 @@ go2rtc starts this when someone opens the camera's RTSP stream and stops it
   3. writes the camera's own H.264 to stdout - no decoding, no re-encoding,
   4. reconnects automatically if Alarm.com or the network ends the session.
 
-Logs go to stderr, which go2rtc copies into its log.
+With ADC_FRAMED=1 (as the manager runs it) each access unit is written as a
+4-byte big-endian length followed by the bytes; otherwise raw H.264. Logs go
+to stderr.
 
 Usage: adc_stream.py camera.front_left_cam
 Inside the app the Supervisor token is used. Elsewhere set HA_URL and HA_TOKEN.
@@ -23,6 +25,7 @@ import logging
 import os
 import re
 import signal
+import struct
 import sys
 import time
 
@@ -211,6 +214,7 @@ class Session:
 
 CURRENT = Session(0)
 _stdout = sys.stdout.buffer
+FRAMED = os.environ.get("ADC_FRAMED") == "1"
 
 
 def _on_access_unit(self, encoded_frame):
@@ -233,10 +237,13 @@ def _on_access_unit(self, encoded_frame):
     if not s.started:
         return []
     try:
-        _stdout.write(data)
+        if FRAMED:
+            _stdout.write(struct.pack(">I", len(data)) + data)
+        else:
+            _stdout.write(data)
         _stdout.flush()
     except (BrokenPipeError, ValueError):
-        os._exit(0)  # go2rtc stopped reading: nobody is watching
+        os._exit(0)  # whoever was reading us has gone
     s.bytes += len(data)
     return []
 
@@ -441,6 +448,15 @@ async def main(entity):
     ha = HomeAssistant()
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
+
+    def quiet_turn_refusals(loop, context):
+        # Alarm.com's relay refuses to forward to the camera's home-network
+        # address ("403 Forbidden IP"). Harmless: we connect directly instead.
+        if type(context.get("exception")).__name__ == "TransactionFailed":
+            return
+        loop.default_exception_handler(context)
+
+    loop.set_exception_handler(quiet_turn_refusals)
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, stop.set)
 
@@ -495,10 +511,13 @@ if __name__ == "__main__":
     )
     for noisy in ("aioice", "aiortc"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
-    log.info("viewer connected, starting camera session")
+    log.info("starting camera session")
     asyncio.run(main(entity_id))
     s = CURRENT
-    log.info(
-        "no viewers left, stopped%s",
-        f" (session {s.number} had been running {time.monotonic() - s.t0:.0f}s)" if s.number else "",
-    )
+    detail = ""
+    if s.number:
+        detail = f" (session {s.number} had been running {time.monotonic() - s.t0:.0f}s"
+        if s.first_keyframe_at:
+            detail += f"; first picture after {s.first_keyframe_at - s.t0:.1f}s"
+        detail += ")"
+    log.info("camera session stopped%s", detail)

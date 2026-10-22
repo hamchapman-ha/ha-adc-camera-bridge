@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.1
+
+- Log lines now start with the date and time.
+
 ## 0.2.0
 
 - One shared camera session per camera, kept open for 60 seconds after the

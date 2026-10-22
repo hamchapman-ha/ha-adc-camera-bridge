@@ -25,7 +25,7 @@ SECRET_HINTS = ("token", "password", "credential", "secret", "key")
 
 
 def log(msg):
-    print(f"[bridge] {msg}", flush=True)
+    print(f"{time.strftime('%Y-%m-%d %H:%M:%S %Z')} [bridge] {msg}", flush=True)
 
 
 def load_options():
@@ -155,7 +155,11 @@ def main():
     with open(GO2RTC_CONFIG, "w") as f:
         f.write("\n".join(lines) + "\n")
 
-    logging.basicConfig(level=logging.DEBUG if debug else logging.INFO, format="[bridge] %(message)s")
+    logging.basicConfig(
+        level=logging.DEBUG if debug else logging.INFO,
+        format="%(asctime)s [bridge] %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S %Z",
+    )
     sys.exit(asyncio.run(run_services(cameras)))
 
 

@@ -507,7 +507,8 @@ if __name__ == "__main__":
     logging.basicConfig(
         stream=sys.stderr,
         level=logging.DEBUG if os.environ.get("ADC_DEBUG") else logging.INFO,
-        format=f"{entity_id}: %(message)s",
+        format=f"%(asctime)s {entity_id}: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S %Z",
     )
     for noisy in ("aioice", "aiortc"):
         logging.getLogger(noisy).setLevel(logging.WARNING)

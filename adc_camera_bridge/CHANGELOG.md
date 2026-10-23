@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.0
+
+- HD: each session now asks the camera for 1280x720, exactly as Alarm.com's
+  web player does, so streams switch up from the default 640x360 a couple of
+  seconds after starting. New option "Ask cameras for HD" (on by default).
+- Sends Alarm.com's signalling keepalive about once a minute, like the
+  official player.
+- The log shows when a camera switches resolution, and each session's stop
+  line includes the resolution it was streaming.
+
 ## 0.2.1
 
 - Log lines now start with the date and time.

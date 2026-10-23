@@ -48,6 +48,9 @@ START = b"\x00\x00\x00\x01"
 CONNECT_TIMEOUT = 20      # seconds from tokens to first keyframe
 STALL_TIMEOUT = 10        # seconds without video before we reconnect
 TOKEN_SETTLE = 0.3        # seconds after camera.turn_on before reading tokens
+KEEPALIVE_EVERY = int(os.environ.get("ADC_KEEPALIVE_SECS", "50"))  # Alarm.com's player: ~1/min
+HD_RESOLUTION = "1280x720"
+REQUEST_HD = os.environ.get("ADC_REQUEST_HD", "1") != "0"
 
 # ---------------------------------------------------------------------------
 # aiortc adjustments that these cameras need (all found with adc_probe.py)
@@ -210,6 +213,18 @@ class Session:
         self.last_frame = None
         self.first_keyframe_at = None
         self.t0 = time.monotonic()
+        self.resolution = None    # from the most recent SPS seen
+        self.switched_at = None   # when the in-band resolution last changed
+
+
+def _sps_pps_in(data):
+    sps = pps = None
+    for n in aiortc_h264.H264Encoder._split_bitstream(data):
+        if n and n[0] & 0x1F == 7:
+            sps = n
+        elif n and n[0] & 0x1F == 8:
+            pps = n
+    return sps, pps
 
 
 CURRENT = Session(0)
@@ -227,6 +242,15 @@ def _on_access_unit(self, encoded_frame):
     types = nal_types(data)
     s.frames += 1
     s.last_frame = time.monotonic()
+    if 7 in types:
+        sps, pps = _sps_pps_in(data)
+        if sps:
+            res = sps_resolution(sps)
+            if res and s.resolution and res != s.resolution:
+                log.info("session %d: camera switched to %dx%d", s.number, res[0], res[1])
+                s.switched_at = time.monotonic()
+            s.resolution = res or s.resolution
+            s.sps, s.pps = sps, pps or s.pps
     if 5 in types:
         s.keyframes += 1
         if not s.started:
@@ -330,6 +354,7 @@ async def run_session(http, ha, entity, number):
     ended = asyncio.Event()
     reason = {"why": "unknown"}
     mids = []
+    peers = {"camera": None, "us": None}  # signalling peer ids, as Alarm.com's player uses them
 
     def end(why):
         if not ended.is_set():
@@ -351,6 +376,37 @@ async def run_session(http, ha, entity, number):
                             await t.receiver._send_rtcp_pli(src.source)
                         except Exception:
                             pass
+
+    async def keepalive(ws):
+        while not ended.is_set():
+            await asyncio.sleep(KEEPALIVE_EVERY)
+            await ws.send_str("keepalive")
+
+    async def request_hd(ws):
+        """Ask for HD the way Alarm.com's web player does, once video is flowing."""
+        if not REQUEST_HD:
+            return
+        while not s.started and not ended.is_set():
+            await asyncio.sleep(0.2)
+        if ended.is_set():
+            return
+        if s.resolution and f"{s.resolution[0]}x{s.resolution[1]}" == HD_RESOLUTION:
+            return
+        if not (peers["camera"] and peers["us"]):
+            log.info("session %d: can't request HD (peer ids unknown)", number)
+            return
+        message = "CHANGE_STREAM " + json.dumps({
+            "to": peers["camera"], "from": peers["us"],
+            "stream": {"streamID": 0, "resolution": HD_RESOLUTION},
+        })
+        for attempt in (1, 2):
+            await ws.send_str(message)
+            for _ in range(30):  # up to 6 s for the camera to switch
+                await asyncio.sleep(0.2)
+                if s.switched_at or ended.is_set():
+                    return
+        log.info("session %d: camera stayed at %s after HD request", number,
+                 f"{s.resolution[0]}x{s.resolution[1]}" if s.resolution else "unknown resolution")
 
     async def watchdog():
         t0 = time.monotonic()
@@ -377,6 +433,13 @@ async def run_session(http, ha, entity, number):
                         await ws.send_str(f"START_SESSION {cfg['cameraAuthToken']}")
                         continue
                     if text.startswith("SESSION_STARTED"):
+                        try:
+                            started = json.loads(text.split(" ", 1)[1])
+                            peers["camera"] = started.get("publisher_peer_id")
+                        except (IndexError, ValueError, AttributeError):
+                            pass
+                        continue
+                    if text.startswith("keepalive"):
                         continue
                     try:
                         data = json.loads(text)
@@ -386,9 +449,12 @@ async def run_session(http, ha, entity, number):
                     sdp = data.get("sdp")
                     if isinstance(sdp, dict) and sdp.get("type") == "offer":
                         offer = sdp["sdp"]
+                        peers["us"] = data.get("to")
+                        peers["camera"] = peers["camera"] or data.get("from")
                         mids[:] = mids_from_sdp(offer)
                         s.sps, s.pps = parse_sprop(offer)
                         res = sps_resolution(s.sps) if s.sps else None
+                        s.resolution = res
                         log.info(
                             "session %d: camera offers H.264 %s%s",
                             number,
@@ -400,7 +466,7 @@ async def run_session(http, ha, entity, number):
                         )
                         await pc.setLocalDescription(await pc.createAnswer())
                         await ws.send_str(json.dumps({
-                            "to": data.get("from"),
+                            "to": peers["camera"],
                             "sdp": {"type": pc.localDescription.type, "sdp": pc.localDescription.sdp},
                         }))
                         continue
@@ -434,7 +500,10 @@ async def run_session(http, ha, entity, number):
                 except Exception as err:
                     end(f"error: {err!r}")
 
-            tasks = [asyncio.create_task(guarded(c)) for c in (reader(), pli_until_keyframe(), watchdog())]
+            tasks = [
+                asyncio.create_task(guarded(c))
+                for c in (reader(), pli_until_keyframe(), watchdog(), keepalive(ws), request_hd(ws))
+            ]
             await ended.wait()
     finally:
         for t in tasks:
@@ -520,5 +589,7 @@ if __name__ == "__main__":
         detail = f" (session {s.number} had been running {time.monotonic() - s.t0:.0f}s"
         if s.first_keyframe_at:
             detail += f"; first picture after {s.first_keyframe_at - s.t0:.1f}s"
+        if s.resolution:
+            detail += f"; streaming {s.resolution[0]}x{s.resolution[1]}"
         detail += ")"
     log.info("camera session stopped%s", detail)

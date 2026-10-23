@@ -25,6 +25,12 @@ configuration:
       the Home app's regular previews on one session instead of reconnecting
       for each one, and makes opening live view instant. 0 disconnects
       straight away.
+  request_hd:
+    name: Ask cameras for HD
+    description: >-
+      Request 1280x720 the way Alarm.com's own web player does. Off leaves the
+      cameras at their default 640x360, which is lighter on Home Assistant
+      when it re-encodes video for the Home app.
   log_level:
     name: Log level
     description: Use debug to see more detail from the camera connections.

@@ -116,6 +116,8 @@ def main():
         sys.exit(1)
 
     linger = int(opts.get("linger_seconds", 60))
+    request_hd = bool(opts.get("request_hd", True))
+    os.environ["ADC_REQUEST_HD"] = "1" if request_hd else "0"  # inherited by camera sessions
     listen = f":{port}" if lan else f"127.0.0.1:{port}"
     lines = [
         "log:",
@@ -151,6 +153,8 @@ def main():
     else:
         log("RTSP is local to Home Assistant only (turn on lan_access to use it from other devices)")
     log(f"Camera sessions stay open {linger}s after the last viewer leaves.")
+    log("Asking cameras for HD (1280x720) at the start of each session." if request_hd
+        else "Not asking cameras for HD; they'll stream at their default (usually 640x360).")
 
     with open(GO2RTC_CONFIG, "w") as f:
         f.write("\n".join(lines) + "\n")
@@ -181,12 +185,17 @@ async def run_services(cameras):
     if go2rtc_exit.done():
         code = go2rtc.returncode or 1
         log(f"go2rtc exited unexpectedly (code {go2rtc.returncode}); stopping")
-    else:
-        go2rtc.terminate()
+    elif go2rtc.returncode is None:
         try:
+            go2rtc.terminate()
             await asyncio.wait_for(go2rtc.wait(), timeout=5)
+        except ProcessLookupError:
+            pass  # already gone (it may have received the same stop signal)
         except asyncio.TimeoutError:
-            go2rtc.kill()
+            try:
+                go2rtc.kill()
+            except ProcessLookupError:
+                pass
     await asyncio.gather(*(c.stop() for c in cameras), return_exceptions=True)
     return code
 

@@ -1,5 +1,5 @@
 name: Alarm.com Camera Bridge
-version: "0.2.1"
+version: "0.3.0"
 slug: adc_camera_bridge
 url: https://github.com/hamchapman-ha/ha-adc-camera-bridge
 description: >-
@@ -19,6 +19,7 @@ options:
   rtsp_password: ""
   exclude: ""
   linger_seconds: 60
+  request_hd: true
   log_level: info
 schema:
   rtsp_port: port
@@ -27,4 +28,5 @@ schema:
   rtsp_password: password?
   exclude: str?
   linger_seconds: int(0,600)
+  request_hd: bool
   log_level: list(info|debug)

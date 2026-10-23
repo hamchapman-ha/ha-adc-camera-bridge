@@ -46,6 +46,9 @@ transport.
 - **Cameras to skip**: comma-separated camera entity IDs.
 - **Keep camera sessions open (seconds)**: how long a camera stays connected
   after the last viewer leaves. Default 60; 0 disconnects straight away.
+- **Ask cameras for HD**: on by default. Cameras start each session at
+  640x360; the app then asks for 1280x720, as Alarm.com's web player does.
+  Turn off to stay at 640x360, which is lighter on Home Assistant.
 - **Log level**: `debug` adds detail from the camera connections.
 
 New cameras are picked up when the app restarts.
@@ -55,13 +58,13 @@ New cameras are picked up when the app restarts.
 Each camera connection logs lines like:
 
 ```
-camera.front_left_cam: session 1: camera offers H.264 1280x720 (profile 77, level 3.1)
+camera.front_left_cam: session 1: camera offers H.264 640x360 (profile 77, level 2.2)
 camera.front_left_cam: session 1 ended after 312s: Alarm.com closed the signalling connection. First picture after 1.7s; ...
 [bridge] front_left_cam: no viewers for 60s, closing camera session
 ```
 
-The resolution line shows what Alarm.com chose for that session (it varies
-between 640x360 and 1280x720).
+Sessions start at 640x360. With HD on, a line like
+`session 1: camera switched to 1280x720` follows a couple of seconds later.
 
 ## HomeKit
 

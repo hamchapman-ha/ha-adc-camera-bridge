@@ -6,7 +6,8 @@ The app's session manager starts this when a camera is first viewed and stops
 it (SIGTERM) a while after the last viewer leaves. While running it:
 
   1. asks Home Assistant's alarmdotcom integration for fresh WebRTC tokens
-     (camera.turn_on, then reads the camera entity's webrtc_config),
+     (its alarmdotcom/webrtc_config websocket command; on integrations older
+     than 2026.10.28, camera.turn_on and the entity's webrtc_config attribute),
   2. connects to the camera over WebRTC exactly like the dashboard card,
   3. writes the camera's own H.264 to stdout - no decoding, no re-encoding,
   4. reconnects automatically if Alarm.com or the network ends the session.
@@ -30,6 +31,7 @@ import sys
 import time
 
 import aiohttp
+import ha_ws
 from aiortc import (
     RTCConfiguration,
     RTCIceServer,
@@ -47,7 +49,8 @@ log = logging.getLogger("adc")
 START = b"\x00\x00\x00\x01"
 CONNECT_TIMEOUT = 20      # seconds from tokens to first keyframe
 STALL_TIMEOUT = 10        # seconds without video before we reconnect
-TOKEN_SETTLE = 0.3        # seconds after camera.turn_on before reading tokens
+TOKEN_SETTLE = 0.3        # seconds after camera.turn_on before reading tokens (old integrations)
+WEBRTC_COMMAND = "alarmdotcom/webrtc_config"  # Alarm.com integration 2026.10.28+
 KEEPALIVE_EVERY = int(os.environ.get("ADC_KEEPALIVE_SECS", "50"))  # Alarm.com's player: ~1/min
 HD_RESOLUTION = "1280x720"
 REQUEST_HD = os.environ.get("ADC_REQUEST_HD", "1") != "0"
@@ -291,6 +294,23 @@ class HomeAssistant:
         self.headers = {"Authorization": f"Bearer {self.token}"}
 
     async def webrtc_config(self, http, entity):
+        """Fresh WebRTC tokens for one camera.
+
+        Alarm.com integration 2026.10.28 and later hand these out only through
+        its authenticated websocket command and no longer put them in the
+        camera's state attributes. Older versions only have the attribute, so
+        fall back to that when the command doesn't exist.
+        """
+        try:
+            cfg = await ha_ws.command(http, {"type": WEBRTC_COMMAND, "entity_id": entity})
+        except ha_ws.HAWebsocketError as err:
+            if err.code != "unknown_command":
+                raise RuntimeError(f"{entity}: Alarm.com integration couldn't supply stream tokens ({err})") from None
+            cfg = await self._legacy_webrtc_config(http, entity)
+        return self._checked(entity, cfg)
+
+    async def _legacy_webrtc_config(self, http, entity):
+        """Alarm.com integration before 2026.10.28: tokens in the webrtc_config attribute."""
         async with http.post(
             f"{self.base}/api/services/camera/turn_on",
             headers=self.headers,
@@ -309,6 +329,12 @@ class HomeAssistant:
         cfg = (state.get("attributes") or {}).get("webrtc_config")
         if not cfg:
             raise RuntimeError(f"{entity} has no webrtc_config yet (state {state.get('state')})")
+        return cfg
+
+    @staticmethod
+    def _checked(entity, cfg):
+        if not isinstance(cfg, dict) or not cfg:
+            raise RuntimeError(f"{entity}: no stream tokens returned")
         if cfg.get("streamType") == "janus" or cfg.get("janusGatewayUrl"):
             raise RuntimeError(f"{entity} uses Alarm.com's Janus streaming, which this app doesn't support yet")
         missing = [k for k in ("signallingServerUrl", "signallingServerToken", "cameraAuthToken") if not cfg.get(k)]

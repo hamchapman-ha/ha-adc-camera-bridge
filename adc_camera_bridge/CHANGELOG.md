@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.1
+
+- Works with Alarm.com integration 2026.10.28 and later. That version stopped
+  putting camera stream tokens in the camera entities' state (a security
+  change), which broke every stream with "has no webrtc_config yet". The app
+  now asks the integration for tokens through its alarmdotcom/webrtc_config
+  websocket command, and finds cameras through the entity registry. Older
+  integration versions still work the old way.
+
 ## 0.3.0
 
 - HD: each session now asks the camera for 1280x720, exactly as Alarm.com's

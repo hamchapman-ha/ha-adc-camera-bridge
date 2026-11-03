@@ -9,6 +9,8 @@ import asyncio
 import logging
 import signal
 
+import aiohttp
+import ha_ws
 from manager import Camera, serve
 
 import json
@@ -48,8 +50,40 @@ def ha_states():
         return json.load(r)
 
 
+async def _registry_cameras():
+    """Entity IDs of the alarmdotcom integration's enabled camera entities."""
+    async with aiohttp.ClientSession() as http:
+        entries = await ha_ws.command(http, {"type": "config/entity_registry/list"})
+    return {
+        e["entity_id"]
+        for e in entries or []
+        if e.get("platform") == "alarmdotcom"
+        and e.get("entity_id", "").startswith("camera.")
+        and not e.get("disabled_by")
+    }
+
+
+def alarmdotcom_cameras(states):
+    """Alarm.com camera entity IDs.
+
+    From the entity registry (works with every integration version); if that
+    can't be read, fall back to the webrtc_config attribute that integrations
+    before 2026.10.28 put on their cameras.
+    """
+    try:
+        return asyncio.run(_registry_cameras())
+    except Exception as err:
+        log(f"couldn't read the entity registry ({err}); looking for webrtc_config attributes instead")
+        return {
+            st.get("entity_id", "")
+            for st in states
+            if st.get("entity_id", "").startswith("camera.")
+            and "webrtc_config" in (st.get("attributes") or {})
+        }
+
+
 def discover(include, exclude):
-    """Camera entities that carry the alarmdotcom integration's webrtc_config."""
+    """The alarmdotcom integration's camera entities, with their state attributes."""
     for attempt in range(30):
         try:
             states = ha_states()
@@ -59,11 +93,12 @@ def discover(include, exclude):
             time.sleep(10)
     else:
         sys.exit("Home Assistant API not reachable")
+    adc = alarmdotcom_cameras(states)
     cams = []
     for st in states:
         eid = st.get("entity_id", "")
         attrs = st.get("attributes") or {}
-        if not eid.startswith("camera.") or "webrtc_config" not in attrs:
+        if eid not in adc:
             continue
         if include and eid not in include:
             continue
@@ -146,7 +181,8 @@ def main():
         cameras.append(Camera(name, eid, APP_DIR, linger, debug))
         friendly = attrs.get("friendly_name", name)
         log(f"  {friendly}: rtsp://127.0.0.1:{port}/{name}")
-        log(f"    webrtc_config: {describe_config(attrs.get('webrtc_config'))}")
+        if "webrtc_config" in attrs:  # integrations before 2026.10.28 only
+            log(f"    webrtc_config: {describe_config(attrs.get('webrtc_config'))}")
     if lan:
         log(f"RTSP is also available on your network at rtsp://<home-assistant-ip>:{port}/<name> "
             f"(username {user})")

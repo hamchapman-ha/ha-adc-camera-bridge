@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.4
+
+- Fixes cameras that stop working after Home Assistant has been running a
+  while. The Alarm.com integration can hold on to a stale login for hours: it
+  still gets stream tokens, but Alarm.com rejects them ("Invalid token!"), so
+  every session ended after 0s with no video until something made the
+  integration log in again. Now, when Alarm.com rejects the tokens, the app
+  reloads the Alarm.com integration (at most once every 10 minutes, shared by
+  all cameras) and tries again about 15 seconds later.
+
 ## 0.3.3
 
 - Logs any signalling message from Alarm.com that isn't part of the normal

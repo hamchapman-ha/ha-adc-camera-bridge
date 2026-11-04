@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.2
+
+- When Alarm.com closes a camera's signalling connection straight away, the
+  log now says how it closed (close code, how long after connecting) and which
+  kinds of signalling message arrived first, to diagnose sessions that end
+  after 0s with no video. Message contents and tokens are never logged.
+
 ## 0.3.1
 
 - Works with Alarm.com integration 2026.10.28 and later. That version stopped

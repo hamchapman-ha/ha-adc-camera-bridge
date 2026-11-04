@@ -446,15 +446,24 @@ async def run_session(http, ha, entity, number):
 
     ws_url = f"{cfg['signallingServerUrl'].rstrip('/')}/{cfg['signallingServerToken']}"
     tasks = []
+    seen = []  # kinds of signalling message received, for the log (never their contents)
     try:
         async with http.ws_connect(ws_url, heartbeat=20) as ws:
+            ws_t0 = time.monotonic()
             await ws.send_str("HELLO 2.0.1")
+
+            def note(kind):
+                if not seen or seen[-1] != kind:
+                    seen.append(kind)
 
             async def reader():
                 async for msg in ws:
                     if msg.type != aiohttp.WSMsgType.TEXT:
+                        note(msg.type.name)
                         continue
                     text = msg.data
+                    note(text.split(" ", 1)[0][:20] if not text.startswith("{") else
+                         "+".join(sorted(k for k in ("sdp", "ice") if f'"{k}"' in text)) or "json")
                     if text.startswith("HELLO"):
                         await ws.send_str(f"START_SESSION {cfg['cameraAuthToken']}")
                         continue
@@ -516,7 +525,12 @@ async def run_session(http, ha, entity, number):
                             await pc.addIceCandidate(c)
                         except Exception:
                             pass
-                end("Alarm.com closed the signalling connection")
+                closed = [f"code {ws.close_code}"]
+                if ws.exception():
+                    closed.append(f"{type(ws.exception()).__name__}")
+                closed.append(f"after {time.monotonic() - ws_t0:.1f}s")
+                closed.append(f"received: {', '.join(seen) if seen else 'nothing'}")
+                end(f"Alarm.com closed the signalling connection ({'; '.join(closed)})")
 
             async def guarded(coro):
                 try:

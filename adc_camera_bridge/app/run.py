@@ -9,6 +9,7 @@ import asyncio
 import logging
 import signal
 
+import adc_login
 import aiohttp
 import ha_ws
 from manager import Camera, serve
@@ -209,6 +210,9 @@ async def run_services(cameras):
     env = dict(os.environ, ADC_SOCK_DIR=SOCK_DIR)
     go2rtc = await asyncio.create_subprocess_exec("go2rtc", "-config", GO2RTC_CONFIG, env=env)
     log("Started go2rtc. Cameras connect only while something is watching.")
+    login_check = asyncio.create_task(adc_login.keep_fresh([c.entity for c in cameras]))
+    if adc_login.CHECK_EVERY > 0:
+        log(f"Checking the Alarm.com login every {adc_login.CHECK_EVERY // 60} minutes so live view starts quickly.")
 
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -217,6 +221,7 @@ async def run_services(cameras):
     go2rtc_exit = asyncio.create_task(go2rtc.wait())
     await asyncio.wait([go2rtc_exit, asyncio.create_task(stop.wait())], return_when=asyncio.FIRST_COMPLETED)
 
+    login_check.cancel()
     code = 0
     if go2rtc_exit.done():
         code = go2rtc.returncode or 1

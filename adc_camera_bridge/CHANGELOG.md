@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.5
+
+- Faster live view. The app now checks the Alarm.com login every 10 minutes
+  in the background (it says hello to Alarm.com's signalling server without
+  asking for video, so cameras aren't woken) and reloads the Alarm.com
+  integration as soon as the login has gone stale, so opening a camera no
+  longer waits for that first.
+- When a session does hit a stale login, it retries about 1 second after the
+  reload instead of a fixed 15, and the other cameras retry as soon as the
+  reload has had time to finish (about 8 seconds) instead of backing off.
+
 ## 0.3.4
 
 - Fixes cameras that stop working after Home Assistant has been running a

@@ -30,8 +30,7 @@ import struct
 import sys
 import time
 
-import fcntl
-
+import adc_login
 import aiohttp
 import ha_ws
 from aiortc import (
@@ -56,12 +55,6 @@ WEBRTC_COMMAND = "alarmdotcom/webrtc_config"  # Alarm.com integration 2026.10.28
 KEEPALIVE_EVERY = int(os.environ.get("ADC_KEEPALIVE_SECS", "50"))  # Alarm.com's player: ~1/min
 HD_RESOLUTION = "1280x720"
 REQUEST_HD = os.environ.get("ADC_REQUEST_HD", "1") != "0"
-# Alarm.com's integration can keep a stale login for hours: it still gets stream
-# tokens, but the signalling server rejects them ("Invalid token!"). Reloading
-# the integration logs it in again. Shared by every camera's process.
-RELOGIN_STAMP = os.path.join(os.environ.get("ADC_SOCK_DIR", "/tmp/adc"), "relogin.stamp")
-RELOGIN_EVERY = 600       # at most one reload per 10 minutes
-RELOGIN_SETTLE = 15       # seconds for the integration to come back
 
 # ---------------------------------------------------------------------------
 # aiortc adjustments that these cameras need (all found with adc_probe.py)
@@ -339,32 +332,6 @@ class HomeAssistant:
         if not cfg:
             raise RuntimeError(f"{entity} has no webrtc_config yet (state {state.get('state')})")
         return cfg
-
-    async def relogin(self, http, entity):
-        """Reload the Alarm.com integration so it logs in again.
-
-        Returns True if this process did the reload, False if another camera
-        did one recently (in which case the tokens should already be good).
-        """
-        os.makedirs(os.path.dirname(RELOGIN_STAMP), exist_ok=True)
-        with open(RELOGIN_STAMP, "a+") as f:
-            fcntl.flock(f, fcntl.LOCK_EX)
-            try:
-                if time.time() - os.path.getmtime(RELOGIN_STAMP) < RELOGIN_EVERY and os.path.getsize(RELOGIN_STAMP):
-                    return False
-                f.write(".")
-                f.flush()
-                os.utime(RELOGIN_STAMP)
-            finally:
-                fcntl.flock(f, fcntl.LOCK_UN)
-        async with http.post(
-            f"{self.base}/api/services/homeassistant/reload_config_entry",
-            headers=self.headers,
-            json={"entity_id": entity},
-            timeout=aiohttp.ClientTimeout(total=60),
-        ) as r:
-            r.raise_for_status()
-        return True
 
     @staticmethod
     def _checked(entity, cfg):
@@ -661,17 +628,22 @@ async def main(entity):
                 elif s.invalid_token:
                     reloaded = False
                     try:
-                        reloaded = await ha.relogin(http, entity)
+                        reloaded = await adc_login.reload_integration(http, entity)
                     except Exception as err:
                         log.warning("couldn't reload the Alarm.com integration: %s", err)
                     if reloaded:
                         log.warning("Alarm.com rejected the stream tokens; reloaded the Alarm.com "
                                     "integration so it logs in again")
-                        await asyncio.sleep(RELOGIN_SETTLE)
-                        backoff = 2
+                        await asyncio.sleep(1)
+                        backoff = 1
                     else:
-                        await asyncio.sleep(max(backoff, RELOGIN_SETTLE))
-                        backoff = min(backoff * 2, 60)
+                        age = adc_login.last_reload()
+                        if age is not None and age < adc_login.RELOAD_TAKES:
+                            await adc_login.wait_for_other_reload()  # another camera is reloading
+                            backoff = 1
+                        else:
+                            await asyncio.sleep(backoff)
+                            backoff = min(backoff * 2, 60)
                 else:
                     await asyncio.sleep(backoff)
                     backoff = min(backoff * 2, 60)

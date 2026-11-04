@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.3
+
+- Logs any signalling message from Alarm.com that isn't part of the normal
+  WebRTC exchange (its keys, and the text of status or error fields only), so
+  the reason Alarm.com gives for refusing a session shows up in the log.
+
 ## 0.3.2
 
 - When Alarm.com closes a camera's signalling connection straight away, the

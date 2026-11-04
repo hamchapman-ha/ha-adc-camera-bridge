@@ -352,6 +352,26 @@ def ice_servers(cfg):
     return servers
 
 
+READABLE_KEYS = ("type", "status", "code", "error", "errorCode", "message", "reason", "description", "event")
+
+
+def describe_message(data):
+    """A signalling message's keys, plus the values of status/error-like keys.
+
+    Peer ids, tokens and other values are left out.
+    """
+    parts = []
+    for k in sorted(data):
+        v = data[k]
+        if k in READABLE_KEYS and isinstance(v, (str, int, float, bool)):
+            parts.append(f"{k}={str(v)[:120]}")
+        elif k in READABLE_KEYS and isinstance(v, dict):
+            parts.append(f"{k}={{{describe_message(v)}}}")
+        else:
+            parts.append(k)
+    return ", ".join(parts) or "(empty)"
+
+
 def mids_from_sdp(sdp):
     mids, current = [], None
     for line in sdp.splitlines():
@@ -480,6 +500,11 @@ async def run_session(http, ha, entity, number):
                         data = json.loads(text)
                     except ValueError:
                         log.info("signalling: %s", text[:200])
+                        continue
+                    if not isinstance(data, dict):
+                        continue
+                    if "sdp" not in data and "ice" not in data:
+                        log.info("session %d: signalling message: %s", number, describe_message(data))
                         continue
                     sdp = data.get("sdp")
                     if isinstance(sdp, dict) and sdp.get("type") == "offer":

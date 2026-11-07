@@ -50,7 +50,7 @@ log = logging.getLogger("adc")
 START = b"\x00\x00\x00\x01"
 CONNECT_TIMEOUT = 20      # seconds from tokens to first keyframe
 JANUS_CONNECT_TIMEOUT = 30  # seconds from tokens to first keyframe through the relay
-JANUS_OFFER_TIMEOUT = 8     # a relay mountpoint that hasn't offered by now never does; start a fresh one
+JANUS_OFFER_TIMEOUT = 10    # a relay session that hasn't offered by now rarely does; start a fresh one
 STALL_TIMEOUT = 10        # seconds without video before we reconnect
 TOKEN_SETTLE = 0.3        # seconds after camera.turn_on before reading tokens (old integrations)
 WEBRTC_COMMAND = "alarmdotcom/webrtc_config"  # Alarm.com integration 2026.10.28+
@@ -471,14 +471,13 @@ async def janus_signalling(ws, cfg, pc, s, number, end):
         })
 
     async def keepalive():
-        last = time.monotonic()
+        last = started = time.monotonic()
         while True:
             await asyncio.sleep(1)
-            # The first mountpoint for an idle camera often never offers, while a
-            # fresh one moments later offers straight away: give up early so the
-            # session restarts with a new one.
-            sent = state.get("watch_sent")
-            if sent and not state.get("offered") and time.monotonic() - sent > JANUS_OFFER_TIMEOUT:
+            # Setting up the relay for a camera that's been idle often stalls
+            # (no mountpoint, no offer), while a fresh attempt moments later
+            # offers straight away: give up early and start again.
+            if not state.get("offered") and time.monotonic() - started > JANUS_OFFER_TIMEOUT:
                 s.quick_retry = True
                 end(f"Alarm.com relay sent no offer within {JANUS_OFFER_TIMEOUT}s")
                 return

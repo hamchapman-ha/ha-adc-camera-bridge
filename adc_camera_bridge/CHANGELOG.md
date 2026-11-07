@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.5
+
+- Janus: the 10-second "start again" limit now covers the whole relay setup
+  (session, mountpoint and offer), since it's the mountpoint step that stalls
+  for an idle camera.
+
 ## 0.4.4
 
 - With log level "debug", logs each Janus relay message's type and status

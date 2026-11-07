@@ -49,7 +49,8 @@ log = logging.getLogger("adc")
 
 START = b"\x00\x00\x00\x01"
 CONNECT_TIMEOUT = 20      # seconds from tokens to first keyframe
-JANUS_CONNECT_TIMEOUT = 45  # the relay can take a while to start pulling from a camera
+JANUS_CONNECT_TIMEOUT = 30  # seconds from tokens to first keyframe through the relay
+JANUS_OFFER_TIMEOUT = 8     # a relay mountpoint that hasn't offered by now never does; start a fresh one
 STALL_TIMEOUT = 10        # seconds without video before we reconnect
 TOKEN_SETTLE = 0.3        # seconds after camera.turn_on before reading tokens (old integrations)
 WEBRTC_COMMAND = "alarmdotcom/webrtc_config"  # Alarm.com integration 2026.10.28+
@@ -221,6 +222,7 @@ class Session:
         self.resolution = None    # from the most recent SPS seen
         self.switched_at = None   # when the in-band resolution last changed
         self.invalid_token = False  # Alarm.com rejected the stream tokens
+        self.quick_retry = False    # failed in a way a fresh attempt usually fixes
 
 
 def _sps_pps_in(data):
@@ -462,15 +464,26 @@ async def janus_signalling(ws, cfg, pc, s, number, end):
 
     async def watch(stream_id):
         state["watching"] = True
+        state["watch_sent"] = time.monotonic()
         await send("watch", {
             "janus": "message", "session_id": state["session"], "handle_id": state["handle"],
             "body": {"request": "watch", "id": stream_id, "token": token, "audio": True, "video": True},
         })
 
     async def keepalive():
+        last = time.monotonic()
         while True:
-            await asyncio.sleep(JANUS_KEEPALIVE_EVERY)
-            if state["session"]:
+            await asyncio.sleep(1)
+            # The first mountpoint for an idle camera often never offers, while a
+            # fresh one moments later offers straight away: give up early so the
+            # session restarts with a new one.
+            sent = state.get("watch_sent")
+            if sent and not state.get("offered") and time.monotonic() - sent > JANUS_OFFER_TIMEOUT:
+                s.quick_retry = True
+                end(f"Alarm.com relay sent no offer within {JANUS_OFFER_TIMEOUT}s")
+                return
+            if state["session"] and time.monotonic() - last >= JANUS_KEEPALIVE_EVERY:
+                last = time.monotonic()
                 await send("keepalive", {"janus": "keepalive", "session_id": state["session"]})
 
     ka = asyncio.create_task(keepalive())
@@ -522,6 +535,7 @@ async def janus_signalling(ws, cfg, pc, s, number, end):
                 continue
             jsep = msg.get("jsep")
             if isinstance(jsep, dict) and jsep.get("type") == "offer":
+                state["offered"] = True
                 offer = jsep.get("sdp") or ""
                 s.sps, s.pps = parse_sprop(offer)
                 res = sps_resolution(s.sps) if s.sps else None
@@ -803,7 +817,7 @@ async def main(entity):
         loop.add_signal_handler(sig, stop.set)
 
     async def stream_forever():
-        number, backoff = 0, 2
+        number, backoff, quick = 0, 2, 0
         async with aiohttp.ClientSession() as http:
             while True:
                 number += 1
@@ -827,8 +841,11 @@ async def main(entity):
                     if s.started else "No video was received.",
                 )
                 if s.started:
-                    backoff = 2
+                    backoff, quick = 2, 0
                     await asyncio.sleep(0.5)  # reconnect straight away
+                elif s.quick_retry and quick < 3:
+                    quick += 1
+                    await asyncio.sleep(0.5)  # a fresh relay mountpoint usually offers at once
                 elif s.invalid_token:
                     reloaded = False
                     try:

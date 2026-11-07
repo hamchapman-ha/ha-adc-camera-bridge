@@ -1,10 +1,16 @@
 # Changelog
 
+## 0.4.3
+
+- Janus: the first relay mountpoint for a camera that's been idle often never
+  sends an offer, while a fresh one a moment later offers straight away. The
+  app now gives a mountpoint 8 seconds to offer, then immediately starts a
+  fresh one (up to three quick retries) instead of waiting. Replaces 0.4.2's
+  longer wait, which didn't help.
+
 ## 0.4.2
 
-- Janus: waits up to 45 seconds (instead of 20) for the first picture. The
-  relay can take a while to start pulling from a camera that's been idle, and
-  giving up at 20 seconds made the first attempt always fail.
+- Janus: waited up to 45 seconds for the first picture (superseded by 0.4.3).
 
 ## 0.4.1
 

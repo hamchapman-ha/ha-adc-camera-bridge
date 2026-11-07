@@ -49,6 +49,7 @@ log = logging.getLogger("adc")
 
 START = b"\x00\x00\x00\x01"
 CONNECT_TIMEOUT = 20      # seconds from tokens to first keyframe
+JANUS_CONNECT_TIMEOUT = 45  # the relay can take a while to start pulling from a camera
 STALL_TIMEOUT = 10        # seconds without video before we reconnect
 TOKEN_SETTLE = 0.3        # seconds after camera.turn_on before reading tokens (old integrations)
 WEBRTC_COMMAND = "alarmdotcom/webrtc_config"  # Alarm.com integration 2026.10.28+
@@ -641,13 +642,15 @@ async def run_session(http, ha, entity, number):
         log.info("session %d: camera stayed at %s after HD request", number,
                  f"{s.resolution[0]}x{s.resolution[1]}" if s.resolution else "unknown resolution")
 
+    connect_timeout = JANUS_CONNECT_TIMEOUT if is_janus(cfg) else CONNECT_TIMEOUT
+
     async def watchdog():
         t0 = time.monotonic()
         while not ended.is_set():
             await asyncio.sleep(1.0)
             now = time.monotonic()
-            if not s.started and now - t0 > CONNECT_TIMEOUT:
-                end(f"no keyframe within {CONNECT_TIMEOUT}s (connection: {pc.connectionState})")
+            if not s.started and now - t0 > connect_timeout:
+                end(f"no keyframe within {connect_timeout}s (connection: {pc.connectionState})")
             elif s.started and now - (s.last_frame or now) > STALL_TIMEOUT:
                 end(f"video stalled for {STALL_TIMEOUT}s")
 

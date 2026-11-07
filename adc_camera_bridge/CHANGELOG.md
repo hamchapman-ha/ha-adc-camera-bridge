@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.2
+
+- Janus: waits up to 45 seconds (instead of 20) for the first picture. The
+  relay can take a while to start pulling from a camera that's been idle, and
+  giving up at 20 seconds made the first attempt always fail.
+
 ## 0.4.1
 
 - Janus: completes the relay's bare H.264 offer (packetization-mode and

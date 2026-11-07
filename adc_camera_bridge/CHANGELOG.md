@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.1
+
+- Janus: completes the relay's bare H.264 offer (packetization-mode and
+  profile) so it can be accepted, and holds on to ICE candidates the relay
+  sends before its offer instead of dropping them.
+
 ## 0.4.0
 
 - Supports cameras that Alarm.com streams through its Janus relay servers

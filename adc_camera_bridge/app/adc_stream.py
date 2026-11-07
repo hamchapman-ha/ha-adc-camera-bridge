@@ -350,6 +350,32 @@ class HomeAssistant:
         return cfg
 
 
+def patch_h264_offer(sdp):
+    """Make every H.264 payload in an offer acceptable to aiortc.
+
+    Janus's RTP mountpoints offer bare "H264/90000" with no fmtp line, which
+    aiortc reads as packetization-mode 0 and refuses. Add (or complete) the
+    fmtp line with packetization-mode=1 and a baseline profile, as the
+    integration's own card does for Apple browsers.
+    """
+    sdp = PROFILE_RE.sub("profile-level-id=42e01f", sdp)
+    for pt in re.findall(r"a=rtpmap:(\d+) H264/90000", sdp, flags=re.I):
+        fmtp = re.search(rf"a=fmtp:{pt} ([^\r\n]*)", sdp)
+        if fmtp:
+            params = fmtp.group(1)
+            extra = []
+            if "profile-level-id" not in params.lower():
+                extra.append("profile-level-id=42e01f")
+            if "packetization-mode" not in params.lower():
+                extra.append("packetization-mode=1")
+            if extra:
+                sdp = sdp.replace(fmtp.group(0), f"a=fmtp:{pt} {params};{';'.join(extra)}", 1)
+        else:
+            sdp = re.sub(rf"(a=rtpmap:{pt} H264/90000)", rf"\1\r\na=fmtp:{pt} packetization-mode=1;profile-level-id=42e01f",
+                         sdp, count=1, flags=re.I)
+    return sdp
+
+
 def is_janus(cfg):
     """Alarm.com relays some cameras through its Janus media servers instead of end-to-end WebRTC."""
     return cfg.get("streamType") == "janus" or bool(cfg.get("janusGatewayUrl"))
@@ -425,6 +451,7 @@ async def janus_signalling(ws, cfg, pc, s, number, end):
     """
     token = cfg["janusToken"]
     pending = {}            # transaction -> what it was for
+    early_candidates = []   # trickled before the offer arrived
     state = {"session": None, "handle": None, "watching": False}
 
     async def send(kind, msg):
@@ -500,9 +527,15 @@ async def janus_signalling(ws, cfg, pc, s, number, end):
                 s.resolution = res
                 log.info("session %d: Alarm.com relay offers H.264 %s", number,
                          f"{res[0]}x{res[1]}" if res else "(resolution in stream)")
-                await pc.setRemoteDescription(
-                    RTCSessionDescription(sdp=PROFILE_RE.sub("profile-level-id=42e01f", offer), type="offer")
-                )
+                log.debug("session %d: relay offer media: %s", number, " | ".join(
+                    l for l in offer.splitlines() if l.startswith(("m=", "a=rtpmap", "a=fmtp", "a=send", "a=recv"))))
+                await pc.setRemoteDescription(RTCSessionDescription(sdp=patch_h264_offer(offer), type="offer"))
+                for c in early_candidates:
+                    try:
+                        await pc.addIceCandidate(c)
+                    except Exception:
+                        pass
+                early_candidates.clear()
                 await pc.setLocalDescription(await pc.createAnswer())
                 await send("start", {
                     "janus": "message", "session_id": state["session"], "handle_id": state["handle"],
@@ -521,6 +554,12 @@ async def janus_signalling(ws, cfg, pc, s, number, end):
                     c = candidate_from_sdp(text)
                     c.sdpMid = cand.get("sdpMid")
                     c.sdpMLineIndex = cand.get("sdpMLineIndex")
+                except Exception:
+                    continue
+                if pc.remoteDescription is None:
+                    early_candidates.append(c)
+                    continue
+                try:
                     await pc.addIceCandidate(c)
                 except Exception:
                     pass

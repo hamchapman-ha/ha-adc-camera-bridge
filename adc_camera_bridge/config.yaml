@@ -1,5 +1,5 @@
 name: Alarm.com Camera Bridge
-version: "0.3.5"
+version: "0.4.0"
 slug: adc_camera_bridge
 url: https://github.com/hamchapman-ha/ha-adc-camera-bridge
 description: >-

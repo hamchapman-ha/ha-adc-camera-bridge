@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.0
+
+- Supports cameras that Alarm.com streams through its Janus relay servers
+  instead of end-to-end WebRTC. Alarm.com can switch a camera between the two
+  at any time; before this, a switch to Janus stopped every stream with
+  "uses Alarm.com's Janus streaming, which this app doesn't support yet".
+  The app follows the same steps as the integration's own camera card: it
+  creates a private mountpoint that pulls from the camera's proxy address,
+  answers the relay's offer and keeps the relay session alive.
+
 ## 0.3.5
 
 - Faster live view. The app now checks the Alarm.com login every 10 minutes

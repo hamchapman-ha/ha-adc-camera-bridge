@@ -337,12 +337,22 @@ class HomeAssistant:
     def _checked(entity, cfg):
         if not isinstance(cfg, dict) or not cfg:
             raise RuntimeError(f"{entity}: no stream tokens returned")
-        if cfg.get("streamType") == "janus" or cfg.get("janusGatewayUrl"):
-            raise RuntimeError(f"{entity} uses Alarm.com's Janus streaming, which this app doesn't support yet")
+        if is_janus(cfg):
+            missing = [k for k in ("janusGatewayUrl", "janusToken") if not cfg.get(k)]
+            if missing:
+                raise RuntimeError(f"{entity} Janus stream info is missing {missing}")
+            if not cfg.get("proxyUrl") and cfg.get("janusStreamId") is None:
+                raise RuntimeError(f"{entity} Janus stream info has neither a proxy URL nor a stream id")
+            return cfg
         missing = [k for k in ("signallingServerUrl", "signallingServerToken", "cameraAuthToken") if not cfg.get(k)]
         if missing:
             raise RuntimeError(f"{entity} webrtc_config is missing {missing}")
         return cfg
+
+
+def is_janus(cfg):
+    """Alarm.com relays some cameras through its Janus media servers instead of end-to-end WebRTC."""
+    return cfg.get("streamType") == "janus" or bool(cfg.get("janusGatewayUrl"))
 
 
 def ice_servers(cfg):
@@ -391,6 +401,142 @@ def mids_from_sdp(sdp):
 # ---------------------------------------------------------------------------
 # One camera session
 # ---------------------------------------------------------------------------
+
+
+async def _guard(coro, end):
+    try:
+        await coro
+    except asyncio.CancelledError:
+        raise
+    except Exception as err:
+        end(f"error: {err!r}")
+
+
+JANUS_KEEPALIVE_EVERY = 25  # Janus drops sessions after 60s without one
+
+
+async def janus_signalling(ws, cfg, pc, s, number, end):
+    """Watch a camera through Alarm.com's Janus relay (the streaming plugin).
+
+    Mirrors the integration's own card: create a session, attach the streaming
+    plugin, create a private mountpoint that pulls from the camera's proxy URL
+    (or watch the given stream id), answer Janus's offer, then keep the session
+    alive. Tokens are never logged.
+    """
+    token = cfg["janusToken"]
+    pending = {}            # transaction -> what it was for
+    state = {"session": None, "handle": None, "watching": False}
+
+    async def send(kind, msg):
+        tx = os.urandom(6).hex()
+        pending[tx] = kind
+        await ws.send_str(json.dumps({**msg, "token": token, "transaction": tx}))
+
+    async def watch(stream_id):
+        state["watching"] = True
+        await send("watch", {
+            "janus": "message", "session_id": state["session"], "handle_id": state["handle"],
+            "body": {"request": "watch", "id": stream_id, "token": token, "audio": True, "video": True},
+        })
+
+    async def keepalive():
+        while True:
+            await asyncio.sleep(JANUS_KEEPALIVE_EVERY)
+            if state["session"]:
+                await send("keepalive", {"janus": "keepalive", "session_id": state["session"]})
+
+    ka = asyncio.create_task(keepalive())
+    try:
+        await send("create", {"janus": "create"})
+        async for raw in ws:
+            if raw.type != aiohttp.WSMsgType.TEXT:
+                continue
+            try:
+                msg = json.loads(raw.data)
+            except ValueError:
+                continue
+            kind = pending.pop(msg.get("transaction"), None) if msg.get("janus") in ("success", "error") else None
+            j = msg.get("janus")
+            if j == "error":
+                err = msg.get("error") or {}
+                end(f"Janus refused {kind or 'a request'}: {err.get('code')} {str(err.get('reason', ''))[:120]}")
+                return
+            if j == "success" and kind == "create":
+                state["session"] = (msg.get("data") or {}).get("id")
+                await send("attach", {"janus": "attach", "session_id": state["session"],
+                                      "plugin": "janus.plugin.streaming"})
+                continue
+            if j == "success" and kind == "attach":
+                state["handle"] = (msg.get("data") or {}).get("id")
+                if cfg.get("proxyUrl"):
+                    await send("mountpoint", {
+                        "janus": "message", "session_id": state["session"], "handle_id": state["handle"],
+                        "body": {
+                            "request": "create", "type": "rtp", "media_uri": cfg["proxyUrl"],
+                            "name": f"{token.split(',')[0]}_Live", "is_private": True,
+                            "streaming_type": "Live", "video": True, "videoport": 0, "videopt": 126,
+                            "videortpmap": "H264/90000", "timeout_seconds": 180, "max_timeout_seconds": 900,
+                        },
+                    })
+                else:
+                    await watch(cfg.get("janusStreamId"))
+                continue
+            plugin = ((msg.get("plugindata") or {}).get("data") or {})
+            if plugin.get("error"):
+                end(f"Janus streaming error {plugin.get('error_code')}: {str(plugin.get('error'))[:120]}")
+                return
+            if kind == "mountpoint" or (j == "success" and cfg.get("proxyUrl") and not state["watching"]):
+                stream_id = (plugin.get("stream") or {}).get("id") or plugin.get("id") or (msg.get("data") or {}).get("id")
+                if stream_id is None:
+                    end("Janus created no mountpoint")
+                    return
+                await watch(stream_id)
+                continue
+            jsep = msg.get("jsep")
+            if isinstance(jsep, dict) and jsep.get("type") == "offer":
+                offer = jsep.get("sdp") or ""
+                s.sps, s.pps = parse_sprop(offer)
+                res = sps_resolution(s.sps) if s.sps else None
+                s.resolution = res
+                log.info("session %d: Alarm.com relay offers H.264 %s", number,
+                         f"{res[0]}x{res[1]}" if res else "(resolution in stream)")
+                await pc.setRemoteDescription(
+                    RTCSessionDescription(sdp=PROFILE_RE.sub("profile-level-id=42e01f", offer), type="offer")
+                )
+                await pc.setLocalDescription(await pc.createAnswer())
+                await send("start", {
+                    "janus": "message", "session_id": state["session"], "handle_id": state["handle"],
+                    "body": {"request": "start"},
+                    "jsep": {"type": pc.localDescription.type, "sdp": pc.localDescription.sdp},
+                })
+                continue
+            if j == "trickle":
+                cand = msg.get("candidate") or {}
+                text = (cand.get("candidate") or "").strip()
+                if not text or cand.get("completed"):
+                    continue
+                if text.startswith("candidate:"):
+                    text = text[10:]
+                try:
+                    c = candidate_from_sdp(text)
+                    c.sdpMid = cand.get("sdpMid")
+                    c.sdpMLineIndex = cand.get("sdpMLineIndex")
+                    await pc.addIceCandidate(c)
+                except Exception:
+                    pass
+                continue
+            if j in ("hangup", "detached"):
+                end(f"Janus {j}: {str(msg.get('reason', ''))[:120]}")
+                return
+        end(f"Alarm.com closed the Janus connection (code {ws.close_code})")
+    finally:
+        ka.cancel()
+        if state["session"] and not ws.closed:
+            try:
+                await ws.send_str(json.dumps({"janus": "destroy", "session_id": state["session"],
+                                              "token": token, "transaction": os.urandom(6).hex()}))
+            except Exception:
+                pass
 
 
 async def run_session(http, ha, entity, number):
@@ -465,6 +611,22 @@ async def run_session(http, ha, entity, number):
                 end(f"no keyframe within {CONNECT_TIMEOUT}s (connection: {pc.connectionState})")
             elif s.started and now - (s.last_frame or now) > STALL_TIMEOUT:
                 end(f"video stalled for {STALL_TIMEOUT}s")
+
+    if is_janus(cfg):
+        tasks = []
+        try:
+            async with http.ws_connect(cfg["janusGatewayUrl"], protocols=("janus-protocol",), heartbeat=20) as ws:
+                tasks = [
+                    asyncio.create_task(_guard(c, end))
+                    for c in (janus_signalling(ws, cfg, pc, s, number, end), pli_until_keyframe(), watchdog())
+                ]
+                await ended.wait()
+        finally:
+            for t in tasks:
+                t.cancel()
+            await pc.close()
+        s.end_reason = reason["why"]
+        return s
 
     ws_url = f"{cfg['signallingServerUrl'].rstrip('/')}/{cfg['signallingServerToken']}"
     tasks = []

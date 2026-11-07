@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.4
+
+- With log level "debug", logs each Janus relay message's type and status
+  (never tokens or addresses), to diagnose relay sessions that never offer.
+
 ## 0.4.3
 
 - Janus: the first relay mountpoint for a camera that's been idle often never

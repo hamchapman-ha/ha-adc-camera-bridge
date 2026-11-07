@@ -393,7 +393,7 @@ def ice_servers(cfg):
     return servers
 
 
-READABLE_KEYS = ("type", "status", "code", "error", "errorCode", "message", "reason", "description", "event")
+READABLE_KEYS = ("type", "status", "code", "error", "errorCode", "error_code", "message", "reason", "description", "event", "streaming", "result")
 
 
 def describe_message(data):
@@ -498,6 +498,10 @@ async def janus_signalling(ws, cfg, pc, s, number, end):
                 continue
             kind = pending.pop(msg.get("transaction"), None) if msg.get("janus") in ("success", "error") else None
             j = msg.get("janus")
+            if log.isEnabledFor(logging.DEBUG):
+                pd = (msg.get("plugindata") or {}).get("data") or {}
+                log.debug("session %d: janus %s%s%s%s", number, j, f" ({kind})" if kind else "",
+                          f" plugin={describe_message(pd)}" if pd else "", " +jsep" if msg.get("jsep") else "")
             if j == "error":
                 err = msg.get("error") or {}
                 end(f"Janus refused {kind or 'a request'}: {err.get('code')} {str(err.get('reason', ''))[:120]}")

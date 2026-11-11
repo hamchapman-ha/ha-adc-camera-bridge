@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.6
+
+- Faster live view when a camera's stream is already open (for example after
+  the Home app has fetched a snapshot): when a new viewer joins, the bridge
+  asks the camera for a fresh keyframe straight away instead of leaving the
+  viewer to wait for the camera's next one (up to ~3 seconds).
+- The "camera session stopped" log line now says how many viewers joined
+  mid-stream and how quickly they got a picture.
+
 ## 0.4.5
 
 - Janus: the 10-second "start again" limit now covers the whole relay setup

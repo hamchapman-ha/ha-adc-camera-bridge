@@ -223,6 +223,8 @@ class Session:
         self.switched_at = None   # when the in-band resolution last changed
         self.invalid_token = False  # Alarm.com rejected the stream tokens
         self.quick_retry = False    # failed in a way a fresh attempt usually fixes
+        self.kf_requests = 0        # keyframes asked for because a viewer joined mid-stream
+        self.kf_waits = []          # how long each of those took to arrive
 
 
 def _sps_pps_in(data):
@@ -236,6 +238,7 @@ def _sps_pps_in(data):
 
 
 CURRENT = Session(0)
+WANT_KEYFRAME = None  # the current session's "a viewer joined, send a keyframe" event
 _stdout = sys.stdout.buffer
 FRAMED = os.environ.get("ADC_FRAMED") == "1"
 
@@ -598,8 +601,9 @@ async def janus_signalling(ws, cfg, pc, s, number, end):
 
 async def run_session(http, ha, entity, number):
     """Stream until the session ends. Returns the Session for reporting."""
-    global CURRENT
+    global CURRENT, WANT_KEYFRAME
     s = CURRENT = Session(number)
+    want_keyframe = WANT_KEYFRAME = asyncio.Event()
     cfg = await ha.webrtc_config(http, entity)
     pc = RTCPeerConnection(RTCConfiguration(iceServers=ice_servers(cfg)))
     ended = asyncio.Event()
@@ -617,16 +621,44 @@ async def run_session(http, ha, entity, number):
         if pc.connectionState in ("failed", "closed"):
             end(f"connection {pc.connectionState}")
 
+    async def send_pli():
+        """Ask the camera for a keyframe (an RTCP picture loss indication)."""
+        for t in pc.getTransceivers():
+            if t.kind == "video":
+                for src in t.receiver.getSynchronizationSources():
+                    try:
+                        await t.receiver._send_rtcp_pli(src.source)
+                    except Exception:
+                        pass
+
     async def pli_until_keyframe():
         while not s.started and not ended.is_set():
             await asyncio.sleep(1.0)
-            for t in pc.getTransceivers():
-                if t.kind == "video":
-                    for src in t.receiver.getSynchronizationSources():
-                        try:
-                            await t.receiver._send_rtcp_pli(src.source)
-                        except Exception:
-                            pass
+            await send_pli()
+
+    async def keyframe_for_new_viewers():
+        """A viewer joined go2rtc mid-stream. go2rtc starts each viewer at the next
+        keyframe, and cameras only send one every few seconds, so ask for one now."""
+        while not ended.is_set():
+            await want_keyframe.wait()
+            want_keyframe.clear()
+            if not s.started:
+                continue  # pli_until_keyframe is already asking
+            k0, t0 = s.keyframes, time.monotonic()
+            s.kf_requests += 1
+            for _ in range(8):  # ask again every 0.3s, for up to 2.4s
+                await send_pli()
+                for _ in range(6):
+                    await asyncio.sleep(0.05)
+                    if s.keyframes > k0:
+                        break
+                if s.keyframes > k0:
+                    break
+            if s.keyframes > k0:
+                s.kf_waits.append(time.monotonic() - t0)
+                log.debug("session %d: new viewer; keyframe after %.2fs", number, s.kf_waits[-1])
+            else:
+                log.debug("session %d: new viewer; no keyframe within 2.4s of asking", number)
 
     async def keepalive(ws):
         while not ended.is_set():
@@ -677,7 +709,8 @@ async def run_session(http, ha, entity, number):
             async with http.ws_connect(cfg["janusGatewayUrl"], protocols=("janus-protocol",), heartbeat=20) as ws:
                 tasks = [
                     asyncio.create_task(_guard(c, end))
-                    for c in (janus_signalling(ws, cfg, pc, s, number, end), pli_until_keyframe(), watchdog())
+                    for c in (janus_signalling(ws, cfg, pc, s, number, end), pli_until_keyframe(), watchdog(),
+                              keyframe_for_new_viewers())
                 ]
                 await ended.wait()
         finally:
@@ -792,7 +825,8 @@ async def run_session(http, ha, entity, number):
 
             tasks = [
                 asyncio.create_task(guarded(c))
-                for c in (reader(), pli_until_keyframe(), watchdog(), keepalive(ws), request_hd(ws))
+                for c in (reader(), pli_until_keyframe(), watchdog(), keepalive(ws), request_hd(ws),
+                          keyframe_for_new_viewers())
             ]
             await ended.wait()
     finally:
@@ -818,6 +852,13 @@ async def main(entity):
     loop.set_exception_handler(quiet_turn_refusals)
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, stop.set)
+
+    def keyframe_requested():
+        # The session manager sends SIGUSR1 when a viewer joins mid-stream.
+        if WANT_KEYFRAME is not None:
+            WANT_KEYFRAME.set()
+
+    loop.add_signal_handler(signal.SIGUSR1, keyframe_requested)
 
     async def stream_forever():
         number, backoff, quick = 0, 2, 0
@@ -903,5 +944,10 @@ if __name__ == "__main__":
             detail += f"; first picture after {s.first_keyframe_at - s.t0:.1f}s"
         if s.resolution:
             detail += f"; streaming {s.resolution[0]}x{s.resolution[1]}"
+        if s.kf_requests:
+            waits = sorted(s.kf_waits)
+            detail += f"; {s.kf_requests} viewer(s) joined mid-stream"
+            if waits:
+                detail += f", picture for them after {waits[len(waits) // 2]:.1f}s typically"
         detail += ")"
     log.info("camera session stopped%s", detail)

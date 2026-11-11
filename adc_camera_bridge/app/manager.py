@@ -98,6 +98,20 @@ class Camera:
             log.info("%s: no viewers for %ds, closing camera session", self.name, self.linger)
             await self.stop()
 
+    def request_keyframe(self):
+        """Ask the running session for a fresh keyframe, for a viewer that joined
+        go2rtc mid-stream. Only once video is flowing: by then the session has
+        its SIGUSR1 handler in place (the default action would end the process)."""
+        proc = self.proc
+        if proc is None or proc.returncode is not None or not self.gop:
+            return False
+        try:
+            proc.send_signal(signal.SIGUSR1)
+        except ProcessLookupError:
+            return False
+        log.debug("%s: viewer joined mid-stream; asked the camera for a keyframe", self.name)
+        return True
+
     # -- camera session process ------------------------------------------
 
     async def _start(self):

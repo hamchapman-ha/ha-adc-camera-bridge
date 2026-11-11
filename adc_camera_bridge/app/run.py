@@ -25,6 +25,8 @@ GO2RTC_CONFIG = os.environ.get("GO2RTC_CONFIG", "/tmp/go2rtc.yaml")
 APP_DIR = os.environ.get("ADC_APP_DIR", "/app")
 SOCK_DIR = os.environ.get("ADC_SOCK_DIR", "/tmp/adc")
 SECRET_HINTS = ("token", "password", "credential", "secret", "key")
+GO2RTC_STREAMS_API = "http://127.0.0.1:11985/api/streams"
+VIEWER_POLL_SECS = 0.25
 
 
 def log(msg):
@@ -204,6 +206,38 @@ def main():
     sys.exit(asyncio.run(run_services(cameras)))
 
 
+async def watch_viewers(cameras, interval=VIEWER_POLL_SECS):
+    """Ask a camera for a keyframe whenever a viewer joins its stream mid-way.
+
+    go2rtc shares one camera feed between all its viewers and starts each new
+    viewer at the next keyframe. The cameras only send one every few seconds,
+    so without this the Home app could wait ~3s for a picture when something
+    else (a snapshot, another phone) already had the stream open.
+    """
+    by_name = {c.name: c for c in cameras}
+    watching = {}
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=2)) as http:
+        while True:
+            try:
+                async with http.get(GO2RTC_STREAMS_API) as r:
+                    streams = await r.json(content_type=None)
+            except asyncio.CancelledError:
+                raise
+            except Exception as err:
+                logging.getLogger("bridge").debug("viewer check failed: %s", err)
+                await asyncio.sleep(2)
+                continue
+            for name, info in (streams or {}).items():
+                cam = by_name.get(name)
+                if cam is None:
+                    continue
+                count = len((info or {}).get("consumers") or [])
+                if count > watching.get(name, 0):
+                    cam.request_keyframe()
+                watching[name] = count
+            await asyncio.sleep(interval)
+
+
 async def run_services(cameras):
     """Run the session manager and go2rtc until either stops or we're told to stop."""
     await serve(cameras, SOCK_DIR)
@@ -211,6 +245,7 @@ async def run_services(cameras):
     go2rtc = await asyncio.create_subprocess_exec("go2rtc", "-config", GO2RTC_CONFIG, env=env)
     log("Started go2rtc. Cameras connect only while something is watching.")
     login_check = asyncio.create_task(adc_login.keep_fresh([c.entity for c in cameras]))
+    viewer_watch = asyncio.create_task(watch_viewers(cameras))
     if adc_login.CHECK_EVERY > 0:
         log(f"Checking the Alarm.com login every {adc_login.CHECK_EVERY // 60} minutes so live view starts quickly.")
 
@@ -222,6 +257,7 @@ async def run_services(cameras):
     await asyncio.wait([go2rtc_exit, asyncio.create_task(stop.wait())], return_when=asyncio.FIRST_COMPLETED)
 
     login_check.cancel()
+    viewer_watch.cancel()
     code = 0
     if go2rtc_exit.done():
         code = go2rtc.returncode or 1
